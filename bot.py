@@ -287,6 +287,73 @@ def user_menu_keyboard():
     )
 
 
+def stock_menu_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📦 Ver stock", callback_data="stock_view"),
+                InlineKeyboardButton("➕ Agregar", callback_data="stock_add_help"),
+            ],
+            [
+                InlineKeyboardButton("🗑 Borrar N", callback_data="stock_del_help"),
+                InlineKeyboardButton("⚙️ Vigencia", callback_data="stock_vigencia"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Ver activos", callback_data="stock_active"),
+                InlineKeyboardButton("⬅️ Volver", callback_data="back_cmds"),
+            ],
+        ]
+    )
+
+
+def stock_menu_text():
+    total, text = stock_list_text(limit=5)
+    return text + "\n\n📦 Usa /stock para agregar y /delstock N para borrar uno."
+
+
+def users_menu_text():
+    return (
+        "👥 <b>MENÚ DE USUARIOS</b>\n\n"
+        "/users - Ver todos los usuarios\n"
+        "/info ID/@user - Ver info completa\n"
+        "/addcred ID/@user CANTIDAD - Añadir créditos\n"
+        "/delcred ID/@user CANTIDAD - Quitar créditos\n"
+        "/compras ID/@user - Ver compras\n"
+        "/panel - Ver cuentas activas\n"
+        "/ban ID/@user - Banear\n"
+        "/unban ID/@user - Desbanear\n"
+        "/aprobar - Ver pendientes\n"
+        "\n⬅️ Usa el botón volver para regresar a /cmds."
+    )
+
+
+def users_menu_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("👥 Ver usuarios", callback_data="users_view"),
+                InlineKeyboardButton("⏳ Pendientes", callback_data="users_pending"),
+            ],
+            [
+                InlineKeyboardButton("➕ Créditos", callback_data="users_addcred"),
+                InlineKeyboardButton("➖ Quitar cred.", callback_data="users_delcred"),
+            ],
+            [
+                InlineKeyboardButton("ℹ️ Info usuario", callback_data="users_info"),
+                InlineKeyboardButton("🛍 Compras", callback_data="users_compras"),
+            ],
+            [
+                InlineKeyboardButton("⛔ Ban", callback_data="users_ban"),
+                InlineKeyboardButton("✅ Unban", callback_data="users_unban"),
+            ],
+            [
+                InlineKeyboardButton("✅ Aprobar", callback_data="users_aprobar"),
+                InlineKeyboardButton("⬅️ Volver", callback_data="back_cmds"),
+            ],
+        ]
+    )
+
+
 def stock_list_text(limit=None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -429,25 +496,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await approve_user_if_admin(uid)
 
+    is_admin_user = is_super_admin(uid)
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, is_pending FROM users WHERE id=?", (uid,))
         existing_user = cursor.fetchone()
 
-        cursor.execute("SELECT is_admin, is_pending FROM users WHERE id=?", (uid,))
-        user_state = cursor.fetchone()
-
-        if user_state and user_state[0] == 1:
-            cursor.execute(
-                "UPDATE users SET is_pending=0, is_admin=1, aprobado_en=datetime('now', 'localtime') WHERE id=?",
-                (uid,),
-            )
+        if is_admin_user:
+            if existing_user:
+                cursor.execute(
+                    "UPDATE users SET is_pending=0, is_admin=1, aprobado_en=datetime('now', 'localtime') WHERE id=?",
+                    (uid,),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO users (id, name, username, credits, is_banned, is_admin, is_pending, fecha_registro, aprobado_en) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))",
+                    (uid, name, username, 0, 0, 1, 0),
+                )
             conn.commit()
             existing_user = (uid, 0)
 
         if not existing_user:
             # New user - insert as pending
-            is_admin_user = is_super_admin(uid)
             cursor.execute(
                 "INSERT INTO users (id, name, username, credits, is_banned, is_admin, is_pending, fecha_registro) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
                 (
@@ -461,30 +532,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
             )
             conn.commit()
-            if is_admin_user:
-                await update.message.reply_text(
-                    """
-👋 <b>Bienvenido a la Tienda Automática</b>
-
-✅ Tu cuenta de admin ha sido activada automáticamente.
-""",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=user_menu_keyboard(),
-                )
-            else:
-                await update.message.reply_text(
-                    """
+            await update.message.reply_text(
+                """
 👋 <b>Bienvenido a la Tienda Automática</b>
 
 ⏳ Tu cuenta está pendiente de aprobación por el administrador.
 """,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=user_menu_keyboard(),
-                )
-                await send_debug_log(
-                    context,
-                    f"🆕 <b>NUEVO USUARIO PENDIENTE</b>\n👤 {name}\n🆔 <code>{uid}</code>\n📛 @{username}",
-                )
+                parse_mode=ParseMode.HTML,
+                reply_markup=user_menu_keyboard(),
+            )
+            await send_debug_log(
+                context,
+                f"🆕 <b>NUEVO USUARIO PENDIENTE</b>\n👤 {name}\n🆔 <code>{uid}</code>\n📛 @{username}",
+            )
         elif existing_user[1] == 1:
             # User exists but is pending
             await update.message.reply_text(
@@ -533,22 +593,11 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🛠 <b>COMANDOS ADMIN</b>
 
 /admin - 🎛 Abre el Panel de Control Interactivo
-/users - Lista usuarios registrados
-/stock TEXTO - Agrega items (puedes pegar una lista)
-/delstock N - Borra un item por número
-/resetstock - Borra todo el stock
-/addcred ID/@user - Agrega créditos
-/delcred ID/@user - Quita créditos
+/users - 👥 Abre el panel de usuarios
+/stock - 📦 Abre el panel de stock
 /anuncio TEXTO - Envía un DM a todos los usuarios
 /canal TEXTO - Publica en el canal oficial
 /testchats - Verifica canal y grupo debug
-/compras ID/@user - Ver compras de alguien
-/info ID/@user - Ver saldo de alguien
-/panel - Ver cuentas activas y días restantes
-/setdias N - ⚙️ Cambia duración de productos
-/ban ID/@user - ⛔️ Bloquea a un usuario
-/unban ID/@user - ✅ Desbloquea a un usuario
-/aprobar ID/@user - Aprueba un usuario pendiente
 """
     if is_super_admin(uid):
         text += """
@@ -664,24 +713,28 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dias_vigencia = get_setting("dias_vigencia")
 
     texto = f"""
-👑 <b>PANEL DE CONTROL PROFESIONAL</b>
+👑 <b>PANEL DE STOCK</b>
 
-👥 <b>Usuarios Registrados:</b> {total_users} (⛔️ {banned_users} baneados)
 📦 <b>Stock Disponible:</b> {stock_count()}
-✅ <b>Cuentas Activas:</b> {active_accounts}
 ⚙️ <b>Vigencia actual:</b> {dias_vigencia} días
+✅ <b>Cuentas Activas:</b> {active_accounts}
 
-👇 <i>Opciones Rápidas:</i>
+👇 <i>Opciones de stock:</i>
 """
     kb = [
         [
-            InlineKeyboardButton("📦 Info Stock", callback_data="admin_stock"),
-            InlineKeyboardButton("📊 Ver Activos", callback_data="admin_panel"),
+            InlineKeyboardButton("📦 Ver stock", callback_data="admin_stock"),
+            InlineKeyboardButton("➕ Agregar", callback_data="stock_add_help"),
         ],
         [
+            InlineKeyboardButton("🗑 Borrar N", callback_data="stock_del_help"),
             InlineKeyboardButton("⚙️ Vigencia", callback_data="admin_vigencia"),
-            InlineKeyboardButton("🧹 Limpiar", callback_data="admin_limpiar"),
         ],
+        [
+            InlineKeyboardButton("🔄 Ver activos", callback_data="admin_panel"),
+            InlineKeyboardButton("👥 Usuarios", callback_data="users_menu"),
+        ],
+        [InlineKeyboardButton("⬅️ Volver a /cmds", callback_data="back_cmds")],
     ]
     await update.message.reply_text(
         texto, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML
@@ -697,6 +750,21 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "admin_stock":
         _, stock_text = stock_list_text(limit=5)
         await query.message.reply_text(stock_text, parse_mode=ParseMode.HTML)
+    elif query.data == "stock_view":
+        _, stock_text = stock_list_text(limit=5)
+        await query.message.reply_text(
+            stock_text, parse_mode=ParseMode.HTML, reply_markup=stock_menu_keyboard()
+        )
+    elif query.data == "stock_add_help":
+        await query.message.reply_text(
+            "➕ <b>Agregar stock</b>\nUsa /stock item1 item2 item3\nTambién puedes separar por saltos de línea, comas o ;",
+            parse_mode=ParseMode.HTML,
+        )
+    elif query.data == "stock_del_help":
+        await query.message.reply_text(
+            "🗑 <b>Borrar stock</b>\nUsa /delstock N para borrar un item por número.",
+            parse_mode=ParseMode.HTML,
+        )
     elif query.data == "admin_panel":
         await panel(update, context)
     elif query.data == "admin_vigencia":
@@ -704,10 +772,54 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚙️ Para cambiar la duración: <code>/setdias 30</code>",
             parse_mode=ParseMode.HTML,
         )
-    elif query.data == "admin_limpiar":
+    elif query.data == "stock_active":
+        await panel(update, context)
+    elif query.data == "users_view":
+        await users_list(update, context)
+    elif query.data == "users_pending":
         await query.message.reply_text(
-            "⚠️ Para borrar TODO el stock, escribe: <code>/resetstock</code>",
+            pending_users_text(),
             parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
+        )
+    elif query.data == "users_addcred":
+        await query.message.reply_text(
+            "➕ Usa <code>/addcred ID CANTIDAD</code>", parse_mode=ParseMode.HTML
+        )
+    elif query.data == "users_delcred":
+        await query.message.reply_text(
+            "➖ Usa <code>/delcred ID CANTIDAD</code>", parse_mode=ParseMode.HTML
+        )
+    elif query.data == "users_info":
+        await query.message.reply_text(
+            "ℹ️ Usa <code>/info ID</code>", parse_mode=ParseMode.HTML
+        )
+    elif query.data == "users_compras":
+        await query.message.reply_text(
+            "🛍 Usa <code>/compras ID</code>", parse_mode=ParseMode.HTML
+        )
+    elif query.data == "users_ban":
+        await query.message.reply_text(
+            "⛔ Usa <code>/ban ID</code>", parse_mode=ParseMode.HTML
+        )
+    elif query.data == "users_unban":
+        await query.message.reply_text(
+            "✅ Usa <code>/unban ID</code>", parse_mode=ParseMode.HTML
+        )
+    elif query.data == "users_aprobar":
+        await query.message.reply_text(
+            "✅ Usa <code>/aprobar</code> para ver pendientes o <code>/aprobar ID</code> para aprobar.",
+            parse_mode=ParseMode.HTML,
+        )
+    elif query.data == "users_menu":
+        await query.message.reply_text(
+            users_menu_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
+        )
+    elif query.data == "back_cmds":
+        await query.message.reply_text(
+            "🔙 Escribe /cmds para ver el menú principal.", parse_mode=ParseMode.HTML
         )
 
 
@@ -851,12 +963,14 @@ async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not users:
         return await update.message.reply_text("No hay usuarios registrados.")
 
-    texto = f"👥 <b>LISTA DE USUARIOS ({len(users)})</b>\n\n"
+    texto = f"👥 <b>PANEL DE USUARIOS ({len(users)})</b>\n\n"
     for u in users:
         estado = "PENDIENTE" if u[3] == 1 else "ACTIVO"
-        texto += f"ID: <code>{u[0]}</code> | {u[1]} | 💰 {u[2]} | {estado}\n"
-    for i in range(0, len(texto), 4000):
-        await update.message.reply_text(texto[i : i + 4000], parse_mode=ParseMode.HTML)
+        texto += f"{u[0]} | {u[1]} | 💰 {u[2]} | {estado}\n"
+    texto += "\n💡 Usa /info, /addcred, /delcred, /ban, /unban, /aprobar"
+    await update.message.reply_text(
+        texto[:4000], parse_mode=ParseMode.HTML, reply_markup=users_menu_keyboard()
+    )
 
 
 async def stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
