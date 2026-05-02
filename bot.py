@@ -293,7 +293,7 @@ def stock_menu_keyboard():
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("📦 Ver stock", callback_data="stock_view"),
+                InlineKeyboardButton("📦 Ver productos", callback_data="stock_view"),
                 InlineKeyboardButton("➕ Agregar", callback_data="stock_add_help"),
             ],
             [
@@ -325,7 +325,7 @@ def users_menu_text():
         "/ban ID/@user - Banear\n"
         "/unban ID/@user - Desbanear\n"
         "/aprobar - Ver pendientes\n"
-        "\n⬅️ Usa el botón volver para regresar a /cmds."
+        "\n⬅️ Usa el botón volver para regresar al menú."
     )
 
 
@@ -358,7 +358,7 @@ def users_menu_keyboard():
 
 def back_to_cmds_keyboard():
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Volver a /cmds", callback_data="back_cmds")]]
+        [[InlineKeyboardButton("⬅️ Volver al menú", callback_data="back_cmds")]]
     )
 
 
@@ -595,14 +595,16 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /ayuda - Pide ayuda al soporte
 /me - Muestra tu perfil, créditos y stock
 /buy - Muestra precios y cómo recargar
-/comprar N - Compra N items y descuenta N créditos (ej: /comprar 2, /comprar 3)
+/comprar 1 - Compra 1 item y descuenta 1 crédito
+/comprar 2 - Compra 2 items y descuenta 2 créditos
+/comprar 3 - Compra 3 items y descuenta 3 créditos
 /historia - Muestra tu historial de compras
 """
     if is_admin(uid):
         text += """
 🛠 <b>COMANDOS ADMIN</b>
 
-/admin - 🎛 Abre el Panel de Control Interactivo
+/productos - 📦 Abre el panel de productos
 /users - 👥 Abre el panel de usuarios
 /stock - 📦 Abre el panel de stock
 /anuncio TEXTO - Envía un DM a todos los usuarios
@@ -624,7 +626,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if is_super_admin(uid) or is_admin(uid):
         await update.message.reply_text(
-            "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa los botones o escribe /cmds.",
+            "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa los botones o escribe /menu.",
             parse_mode=ParseMode.HTML,
             reply_markup=user_menu_keyboard(),
         )
@@ -633,6 +635,20 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa /start para comenzar.",
         parse_mode=ParseMode.HTML,
         reply_markup=user_menu_keyboard(),
+    )
+
+
+async def productos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await admin(update, context)
+
+
+async def usuarios_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(
+        users_menu_text(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=users_menu_keyboard(),
     )
 
 
@@ -751,7 +767,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dias_vigencia = get_setting("dias_vigencia")
 
     texto = f"""
-👑 <b>PANEL DE STOCK</b>
+👑 <b>PANEL DE PRODUCTOS</b>
 
 📦 <b>Stock Disponible:</b> {stock_count()}
 ⚙️ <b>Vigencia actual:</b> {dias_vigencia} días
@@ -772,7 +788,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔄 Ver activos", callback_data="admin_panel"),
             InlineKeyboardButton("👥 Usuarios", callback_data="users_menu"),
         ],
-        [InlineKeyboardButton("⬅️ Volver a /cmds", callback_data="back_cmds")],
+        [InlineKeyboardButton("⬅️ Volver al menú", callback_data="back_cmds")],
     ]
     await update.effective_message.reply_text(
         texto, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML
@@ -797,13 +813,13 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif query.data == "stock_add_help":
         await query.message.reply_text(
-            "➕ <b>Agregar stock</b>\nUsa /stock item1 item2 item3\nTambién puedes separar por saltos de línea, comas o ;",
+            "➕ <b>Agregar productos</b>\nUsa <code>/stock producto1 producto2 producto3</code>\nEjemplo: <code>/stock user:pass user2:pass2</code>",
             parse_mode=ParseMode.HTML,
             reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "stock_del_help":
         await query.message.reply_text(
-            "🗑 <b>Borrar stock</b>\nUsa /delstock N para borrar un item por número.",
+            "🗑 <b>Borrar producto</b>\nUsa <code>/delstock N</code>\nEjemplo: <code>/delstock 2</code>",
             parse_mode=ParseMode.HTML,
             reply_markup=stock_menu_keyboard(),
         )
@@ -811,7 +827,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await panel(update, context)
     elif query.data == "admin_vigencia":
         await query.message.reply_text(
-            "⚙️ Para cambiar la duración: <code>/setdias 30</code>",
+            "⚙️ <b>Vigencia</b>\nUsa <code>/setdias 30</code>\nEjemplo: <code>/setdias 30</code>",
             parse_mode=ParseMode.HTML,
             reply_markup=stock_menu_keyboard(),
         )
@@ -827,32 +843,45 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif query.data == "users_addcred":
         await query.message.reply_text(
-            "➕ Usa <code>/addcred ID CANTIDAD</code>", parse_mode=ParseMode.HTML
+            "➕ <b>Añadir créditos</b>\nUsa <code>/addcred ID CANTIDAD</code>\nEjemplo: <code>/addcred 123456789 5</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_delcred":
         await query.message.reply_text(
-            "➖ Usa <code>/delcred ID CANTIDAD</code>", parse_mode=ParseMode.HTML
+            "➖ <b>Quitar créditos</b>\nUsa <code>/delcred ID CANTIDAD</code>\nEjemplo: <code>/delcred 123456789 2</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_info":
         await query.message.reply_text(
-            "ℹ️ Usa <code>/info ID</code>", parse_mode=ParseMode.HTML
+            "ℹ️ <b>Info usuario</b>\nUsa <code>/info ID</code>\nEjemplo: <code>/info 123456789</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_compras":
         await query.message.reply_text(
-            "🛍 Usa <code>/compras ID</code>", parse_mode=ParseMode.HTML
+            "🛍 <b>Compras</b>\nUsa <code>/compras ID</code>\nEjemplo: <code>/compras 123456789</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_ban":
         await query.message.reply_text(
-            "⛔ Usa <code>/ban ID</code>", parse_mode=ParseMode.HTML
+            "⛔ <b>Banear</b>\nUsa <code>/ban ID</code>\nEjemplo: <code>/ban 123456789</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_unban":
         await query.message.reply_text(
-            "✅ Usa <code>/unban ID</code>", parse_mode=ParseMode.HTML
+            "✅ <b>Desbanear</b>\nUsa <code>/unban ID</code>\nEjemplo: <code>/unban 123456789</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_aprobar":
         await query.message.reply_text(
-            "✅ Usa <code>/aprobar</code> para ver pendientes o <code>/aprobar ID</code> para aprobar.",
+            "✅ <b>Aprobar usuarios</b>\nUsa <code>/aprobar</code> para ver pendientes\nEjemplo: <code>/aprobar 123456789</code>",
             parse_mode=ParseMode.HTML,
+            reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_menu":
         await query.message.reply_text(
@@ -862,7 +891,9 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif query.data == "back_cmds":
         await query.message.reply_text(
-            "🔙 Escribe /cmds para ver el menú principal.", parse_mode=ParseMode.HTML
+            "🔙 Escribe /menu para volver al menú principal.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_menu_keyboard(),
         )
 
 
@@ -1570,13 +1601,14 @@ def main():
     app.add_handler(CommandHandler("comprar", comprar))
     app.add_handler(CommandHandler("historia", historia))
 
+    app.add_handler(CommandHandler("productos", productos))
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CallbackQueryHandler(admin_callbacks, pattern="^admin_"))
 
     app.add_handler(CommandHandler("addadmin", addadmin))
     app.add_handler(CommandHandler("deladmin", deladmin))
     app.add_handler(CommandHandler("admins", admins))
-    app.add_handler(CommandHandler("users", users_list))
+    app.add_handler(CommandHandler("users", usuarios_panel))
     app.add_handler(CommandHandler("aprobar", aprobar))
 
     app.add_handler(CommandHandler("stock", stock))
