@@ -55,7 +55,8 @@ def init_db():
             username TEXT,
             credits INTEGER DEFAULT 0,
             is_banned INTEGER DEFAULT 0,
-            is_admin INTEGER DEFAULT 0
+            is_admin INTEGER DEFAULT 0,
+            is_pending INTEGER DEFAULT 1
         )
         """)
         cursor.execute("""
@@ -100,6 +101,10 @@ def init_db():
             pass
         try:
             cursor.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+        except:
+            pass
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN is_pending INTEGER DEFAULT 1")
         except:
             pass
 
@@ -183,9 +188,10 @@ def set_setting(key, value):
 async def send_debug_log(context: ContextTypes.DEFAULT_TYPE, text: str):
     if LOG_GROUP_ID != 0:
         try:
+            timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             await context.bot.send_message(
                 chat_id=LOG_GROUP_ID,
-                text=f"🔍 <b>AUDITORÍA</b>\n\n{text}",
+                text=f"🔍 <b>AUDITORÍA</b> - {timestamp}\n\n{text}",
                 parse_mode=ParseMode.HTML,
             )
         except Exception as e:
@@ -207,33 +213,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = user.first_name or "Usuario"
     username = user.username if user.username else "sin_username"
 
-    is_new_user = False
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE id=?", (uid,))
-        if not cursor.fetchone():
+        cursor.execute("SELECT id, is_pending FROM users WHERE id=?", (uid,))
+        existing_user = cursor.fetchone()
+
+        if not existing_user:
+            # New user - insert as pending
             cursor.execute(
-                "INSERT INTO users (id, name, username, credits, is_banned, is_admin) VALUES (?, ?, ?, ?, ?, ?)",
-                (uid, name, username, 0, 0, 0),
+                "INSERT INTO users (id, name, username, credits, is_banned, is_admin, is_pending) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (uid, name, username, 0, 0, 0, 1),
             )
             conn.commit()
-            is_new_user = True
+            await update.message.reply_text(
+                """
+👋 <b>Bienvenido a la Tienda Automática</b>
 
-    await update.message.reply_text(
-        """
+⏳ Tu cuenta está pendiente de aprobación por el administrador.
+Notificarás cuando sea aprobado.
+""",
+                parse_mode=ParseMode.HTML,
+            )
+            await send_debug_log(
+                context,
+                f"🆕 <b>NUEVO USUARIO PENDIENTE</b>\n👤 {name}\n🆔 <code>{uid}</code>\n📛 @{username}",
+            )
+        elif existing_user[1] == 1:
+            # User exists but is pending
+            await update.message.reply_text(
+                """
+⏳ <b>Cuenta Pendiente de Aprobación</b>
+
+Tu cuenta está esperando aprobación por el administrador.
+Por favor espera ser aprobado para usar el bot.
+""",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            # User is approved
+            await update.message.reply_text(
+                """
 👋 <b>Bienvenido a la Tienda Automática</b>
 
 ✅ Tu cuenta ha sido validada.
 Usa /cmds para ver todos los comandos.
 """,
-        parse_mode=ParseMode.HTML,
-    )
-
-    if is_new_user:
-        await send_debug_log(
-            context,
-            f"🆕 <b>NUEVO USUARIO</b>\n👤 {name}\n🆔 <code>{uid}</code>\n📛 @{username}",
-        )
+                parse_mode=ParseMode.HTML,
+            )
 
 
 async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,7 +272,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
 📜 <b>COMANDOS USUARIO</b>
 
-/start - Inicia el bot y te registra
+/start - Inicia el bot y registra tu cuenta (pendiente de aprobación)
 /me - Muestra tu perfil, créditos y stock
 /buy - Muestra precios y cómo recargar
 /comprar 1 - Compra 1 item (descuenta 1 crédito)
@@ -269,6 +295,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /setdias N - ⚙️ Cambia duración de productos
 /ban ID/@user - ⛔️ Bloquea a un usuario
 /unban ID/@user - ✅ Desbloquea a un usuario
+/aprobar ID/@user - Aprueba un usuario pendiente
 """
     if is_super_admin(uid):
         text += """
@@ -390,10 +417,24 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     if query.data == "admin_stock":
-        await query.message.reply_text(
-            f"📦 <b>Stock Actual:</b> {stock_count()} items.\n💡 <i>Con /stock puedes pegar múltiples cuentas separadas por salto de línea.</i>",
-            parse_mode=ParseMode.HTML,
-        )
+        count = stock_count()
+        if count == 0:
+            await query.message.reply_text(
+                "📦 <b>Stock Actual:</b> Vacío.\n💡 Usa /stock para agregar items.",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT item FROM stock LIMIT 5")
+                items = cursor.fetchall()
+                items_text = "\n".join([f"• {item[0]}" for item in items])
+                more_text = f"\n\n... y {count - 5} más" if count > 5 else ""
+                await query.message.reply_text(
+                    f"📦 <b>Stock Actual ({count} items):</b>\n{items_text}{more_text}\n"
+                    f"💡 <i>Con /stock puedes pegar múltiples cuentas separadas por salto de línea.</i>",
+                    parse_mode=ParseMode.HTML,
+                )
     elif query.data == "admin_panel":
         await panel(update, context)
     elif query.data == "admin_vigencia":
@@ -494,6 +535,36 @@ async def admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
             texto += f"- {a[1]} {uname} | <code>{a[0]}</code>\n"
 
     await update.message.reply_text(texto, parse_mode=ParseMode.HTML)
+
+
+async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_super_admin(update.effective_user.id):
+        return await update.message.reply_text(
+            "❌ Solo el Dueño Principal puede aprobar usuarios."
+        )
+
+    if not context.args:
+        return await update.message.reply_text("Uso: /aprobar ID o @usuario")
+
+    target = context.args[0]
+    user_data = buscar_usuario_por_arg(target)
+
+    if not user_data:
+        return await update.message.reply_text("❌ Usuario no encontrado.")
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET is_pending=0 WHERE id=?", (user_data[0],))
+        conn.commit()
+
+    await update.message.reply_text(
+        f"✅ <b>USUARIO APROBADO</b>\nEl usuario {user_data[1]} (<code>{user_data[0]}</code>) ahora puede usar el bot.",
+        parse_mode=ParseMode.HTML,
+    )
+    await send_debug_log(
+        context,
+        f"✅ <b>USUARIO APROBADO</b>\n👮 Aprobado por: {update.effective_user.id}\n👤 Usuario: {user_data[1]} (<code>{user_data[0]}</code>)",
+    )
 
 
 # ================= RESTO DE FUNCIONES ADMIN =================
@@ -950,6 +1021,7 @@ def main():
     app.add_handler(CommandHandler("deladmin", deladmin))
     app.add_handler(CommandHandler("admins", admins))
     app.add_handler(CommandHandler("users", users_list))
+    app.add_handler(CommandHandler("aprobar", aprobar))
 
     app.add_handler(CommandHandler("stock", stock))
     app.add_handler(CommandHandler("resetstock", resetstock))
