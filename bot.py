@@ -280,7 +280,8 @@ def user_menu_keyboard():
         [
             [KeyboardButton("/menu"), KeyboardButton("/start")],
             [KeyboardButton("/me"), KeyboardButton("/buy")],
-            [KeyboardButton("/comprar 1"), KeyboardButton("/historia")],
+            [KeyboardButton("/comprar 1"), KeyboardButton("/comprar 2")],
+            [KeyboardButton("/comprar 3"), KeyboardButton("/historia")],
             [KeyboardButton("/ayuda"), KeyboardButton("/cmds")],
         ],
         resize_keyboard=True,
@@ -594,7 +595,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /ayuda - Pide ayuda al soporte
 /me - Muestra tu perfil, créditos y stock
 /buy - Muestra precios y cómo recargar
-/comprar 1 - Compra 1 item (descuenta 1 crédito)
+/comprar N - Compra N items y descuenta N créditos (ej: /comprar 2, /comprar 3)
 /historia - Muestra tu historial de compras
 """
     if is_admin(uid):
