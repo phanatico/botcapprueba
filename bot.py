@@ -20,6 +20,22 @@ from telegram.ext import (
 
 load_dotenv()
 
+
+def normalize_chat_id(raw_value):
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    if value.startswith("@"):
+        return value
+    if value.lstrip("-").isdigit():
+        if value.startswith("-100"):
+            return int(value)
+        if value.startswith("-"):
+            return int(f"-100{value[1:]}")
+        return int(value)
+    return value
+
+
 # ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -27,7 +43,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 admin_env = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in admin_env.split(",") if x.strip()]
 
-LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", "0"))
+LOG_GROUP_ID = os.getenv("LOG_GROUP_ID", "").strip()
 CHANNEL_URL = os.getenv("CHANNEL_URL", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip()
@@ -56,7 +72,10 @@ def init_db():
             credits INTEGER DEFAULT 0,
             is_banned INTEGER DEFAULT 0,
             is_admin INTEGER DEFAULT 0,
-            is_pending INTEGER DEFAULT 1
+            is_pending INTEGER DEFAULT 0,
+            fecha_registro DATETIME DEFAULT (datetime('now', 'localtime')),
+            ultima_recarga DATETIME,
+            aprobado_en DATETIME
         )
         """)
         cursor.execute("""
@@ -104,9 +123,30 @@ def init_db():
         except:
             pass
         try:
-            cursor.execute("ALTER TABLE users ADD COLUMN is_pending INTEGER DEFAULT 1")
+            cursor.execute("ALTER TABLE users ADD COLUMN is_pending INTEGER DEFAULT 0")
         except:
             pass
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN fecha_registro DATETIME")
+        except:
+            pass
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN ultima_recarga DATETIME")
+        except:
+            pass
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN aprobado_en DATETIME")
+        except:
+            pass
+
+        cursor.execute("PRAGMA table_info(users)")
+        user_columns = {row[1] for row in cursor.fetchall()}
+        if "is_pending" in user_columns:
+            cursor.execute("UPDATE users SET is_pending=0 WHERE is_pending IS NULL")
+        if "fecha_registro" in user_columns:
+            cursor.execute(
+                "UPDATE users SET fecha_registro=datetime('now', 'localtime') WHERE fecha_registro IS NULL OR fecha_registro=''"
+            )
 
         conn.commit()
 
@@ -170,6 +210,14 @@ def is_user_banned(uid):
         return res[0] == 1 if res else False
 
 
+def is_user_pending(uid):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_pending FROM users WHERE id=?", (str(uid),))
+        res = cursor.fetchone()
+        return res[0] == 1 if res else False
+
+
 def get_setting(key):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -185,17 +233,128 @@ def set_setting(key, value):
         conn.commit()
 
 
-async def send_debug_log(context: ContextTypes.DEFAULT_TYPE, text: str):
-    if LOG_GROUP_ID != 0:
+def format_datetime(value):
+    if not value:
+        return "No disponible"
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").strftime(
+            "%d/%m/%Y %H:%M:%S"
+        )
+    except Exception:
+        return str(value)
+
+
+def pending_users_text():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, username, fecha_registro FROM users WHERE is_pending=1 ORDER BY fecha_registro ASC"
+        )
+        pending_users = cursor.fetchall()
+
+    if not pending_users:
+        return "✅ No hay usuarios pendientes de aprobación."
+
+    texto = "⏳ <b>USUARIOS PENDIENTES DE APROBACIÓN</b>\n\n"
+    for user in pending_users:
+        uname = (
+            f"@{user[2]}" if user[2] and user[2] != "sin_username" else "Sin username"
+        )
+        texto += (
+            f"👤 {user[1]} ({uname})\n"
+            f"🆔 <code>{user[0]}</code>\n"
+            f"🕒 Registro: {format_datetime(user[3])}\n\n"
+        )
+    texto += "💡 Usa /aprobar ID o @usuario para aprobar uno."
+    return texto
+
+
+def parse_stock_items(raw_text):
+    cleaned = (raw_text or "").replace("\r", "\n")
+    cleaned = cleaned.replace("/stock", " ")
+    cleaned = cleaned.replace(",", "\n").replace(";", "\n").replace("|", "\n")
+
+    chunks = []
+    for block in cleaned.split("\n"):
+        block = block.strip()
+        if not block:
+            continue
+        if " " in block:
+            parts = [part.strip() for part in block.split() if part.strip()]
+            chunks.extend(parts)
+        else:
+            chunks.append(block)
+
+    return [item for item in chunks if item]
+
+
+async def ensure_user_access(update: Update):
+    uid = str(update.effective_user.id)
+    if is_admin(uid):
+        return True
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_pending, is_banned FROM users WHERE id=?", (uid,))
+        row = cursor.fetchone()
+    if not row:
+        await update.message.reply_text("⚠️ Usa /start primero.")
+        return False
+    if row[1] == 1:
+        await update.message.reply_text(
+            "⛔️ <b>ACCESO DENEGADO</b>\nTu cuenta ha sido suspendida.",
+            parse_mode=ParseMode.HTML,
+        )
+        return False
+    if row[0] == 1:
+        await update.message.reply_text(
+            "⏳ <b>Cuenta pendiente</b>\nTu cuenta sigue esperando aprobación del administrador.",
+            parse_mode=ParseMode.HTML,
+        )
+        return False
+    return True
+
+
+async def resolve_chat_target(bot, raw_chat_id):
+    candidates = []
+    normalized = normalize_chat_id(raw_chat_id)
+    raw_value = str(raw_chat_id or "").strip()
+    if normalized is not None:
+        candidates.append(normalized)
+    if raw_value:
+        if raw_value.startswith("@"):
+            candidates.append(raw_value)
+        elif raw_value.lstrip("-").isdigit():
+            candidates.append(int(raw_value))
+
+    unique_candidates = []
+    for candidate in candidates:
+        if candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+
+    errors = []
+    for candidate in unique_candidates:
         try:
-            timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            await context.bot.send_message(
-                chat_id=LOG_GROUP_ID,
-                text=f"🔍 <b>AUDITORÍA</b> - {timestamp}\n\n{text}",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as e:
-            print(f"Error enviando log: {e}")
+            chat = await bot.get_chat(candidate)
+            return candidate, chat
+        except Exception as exc:
+            errors.append(f"{candidate}: {exc}")
+
+    raise RuntimeError(" | ".join(errors) or "chat id vacio")
+
+
+async def send_debug_log(context: ContextTypes.DEFAULT_TYPE, text: str):
+    if not LOG_GROUP_ID:
+        return
+    try:
+        timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        chat_id, _ = await resolve_chat_target(context.bot, LOG_GROUP_ID)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🔍 <b>AUDITORÍA</b> - {timestamp}\n\n{text}",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        print(f"Error enviando log a {LOG_GROUP_ID}: {e}")
 
 
 # ================= ERROR =================
@@ -221,7 +380,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not existing_user:
             # New user - insert as pending
             cursor.execute(
-                "INSERT INTO users (id, name, username, credits, is_banned, is_admin, is_pending) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (id, name, username, credits, is_banned, is_admin, is_pending, fecha_registro) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
                 (uid, name, username, 0, 0, 0, 1),
             )
             conn.commit()
@@ -283,12 +442,14 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🛠 <b>COMANDOS ADMIN</b>
 
 /admin - 🎛 Abre el Panel de Control Interactivo
+/users - Lista usuarios registrados
 /stock TEXTO - Agrega items (puedes pegar una lista)
 /resetstock - Borra todo el stock
 /addcred ID/@user - Agrega créditos
 /delcred ID/@user - Quita créditos
 /anuncio TEXTO - Envía un DM a todos los usuarios
 /canal TEXTO - Publica en el canal oficial
+/testchats - Verifica canal y grupo debug
 /compras ID/@user - Ver compras de alguien
 /info ID/@user - Ver saldo de alguien
 /panel - Ver cuentas activas y días restantes
@@ -310,10 +471,15 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= ME & BUY =================
 async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_user_access(update):
+        return
     uid = str(update.effective_user.id)
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT name, username, credits FROM users WHERE id=?", (uid,))
+        cursor.execute(
+            "SELECT name, username, credits, fecha_registro, ultima_recarga FROM users WHERE id=?",
+            (uid,),
+        )
         user = cursor.fetchone()
 
     if not user:
@@ -326,6 +492,8 @@ async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🆔 ID: <code>{uid}</code>
 💰 Créditos Disponibles: {user[2]}
 📦 Stock Tienda: {stock_count()}
+🕒 Registro: {format_datetime(user[3])}
+💳 Última recarga: {format_datetime(user[4])}
 """
     try:
         await update.effective_message.reply_photo(
@@ -340,6 +508,8 @@ async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_user_access(update):
+        return
     kb = [
         [InlineKeyboardButton("📢 Canal Oficial", url=CHANNEL_URL)],
         [
@@ -426,13 +596,13 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT item FROM stock LIMIT 5")
+                cursor.execute("SELECT item FROM stock ORDER BY id DESC LIMIT 5")
                 items = cursor.fetchall()
                 items_text = "\n".join([f"• {item[0]}" for item in items])
                 more_text = f"\n\n... y {count - 5} más" if count > 5 else ""
                 await query.message.reply_text(
                     f"📦 <b>Stock Actual ({count} items):</b>\n{items_text}{more_text}\n"
-                    f"💡 <i>Con /stock puedes pegar múltiples cuentas separadas por salto de línea.</i>",
+                    f"💡 <i>Con /stock puedes pegar varias cuentas por espacios, saltos de línea, comas o repitiendo /stock.</i>",
                     parse_mode=ParseMode.HTML,
                 )
     elif query.data == "admin_panel":
@@ -544,7 +714,8 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if not context.args:
-        return await update.message.reply_text("Uso: /aprobar ID o @usuario")
+        await update.message.reply_text(pending_users_text(), parse_mode=ParseMode.HTML)
+        return
 
     target = context.args[0]
     user_data = buscar_usuario_por_arg(target)
@@ -554,7 +725,10 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE users SET is_pending=0 WHERE id=?", (user_data[0],))
+        cursor.execute(
+            "UPDATE users SET is_pending=0, aprobado_en=datetime('now', 'localtime') WHERE id=?",
+            (user_data[0],),
+        )
         conn.commit()
 
     await update.message.reply_text(
@@ -565,6 +739,13 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context,
         f"✅ <b>USUARIO APROBADO</b>\n👮 Aprobado por: {update.effective_user.id}\n👤 Usuario: {user_data[1]} (<code>{user_data[0]}</code>)",
     )
+    try:
+        await context.bot.send_message(
+            chat_id=int(user_data[0]),
+            text="✅ Tu cuenta ha sido aprobada. Ya puedes usar el bot con /cmds.",
+        )
+    except Exception:
+        pass
 
 
 # ================= RESTO DE FUNCIONES ADMIN =================
@@ -572,13 +753,16 @@ async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("❌ No tienes permisos.")
     with get_db_connection() as conn:
-        users = conn.execute("SELECT id, username, credits FROM users").fetchall()
+        users = conn.execute(
+            "SELECT id, username, credits, is_pending FROM users ORDER BY id DESC"
+        ).fetchall()
     if not users:
         return await update.message.reply_text("No hay usuarios registrados.")
 
     texto = f"👥 <b>LISTA DE USUARIOS ({len(users)})</b>\n\n"
     for u in users:
-        texto += f"ID: <code>{u[0]}</code> | {u[1]} | 💰 {u[2]}\n"
+        estado = "PENDIENTE" if u[3] == 1 else "ACTIVO"
+        texto += f"ID: <code>{u[0]}</code> | {u[1]} | 💰 {u[2]} | {estado}\n"
     for i in range(0, len(texto), 4000):
         await update.message.reply_text(texto[i : i + 4000], parse_mode=ParseMode.HTML)
 
@@ -589,10 +773,14 @@ async def stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     partes = update.message.text.split(maxsplit=1)
     if len(partes) < 2:
         return await update.message.reply_text(
-            "Uso: /stock correo:pass\n💡 Puedes pegar varias a la vez."
+            "Uso: /stock correo:pass\n💡 Puedes pegar varias a la vez separadas por espacios, saltos de línea, comas o repitiendo /stock."
         )
     mensaje = partes[1].strip()
-    items = [line.strip() for line in mensaje.split("\n") if line.strip()]
+    items = parse_stock_items(mensaje)
+    if not items:
+        return await update.message.reply_text(
+            "❌ No se detectaron items válidos para agregar."
+        )
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.executemany(
@@ -600,11 +788,12 @@ async def stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         conn.commit()
     await update.message.reply_text(
-        f"✅ {len(items)} item(s) agregados.\n📦 Stock total: {stock_count()}"
+        f"✅ {len(items)} item(s) agregados.\n📦 Stock total: {stock_count()}\n📝 Últimos agregados:\n"
+        + "\n".join([f"• {item}" for item in items[:5]])
     )
     await send_debug_log(
         context,
-        f"📦 <b>STOCK AGREGADO</b>\n👮 Admin: {update.effective_user.id}\n➕ Cantidad: {len(items)}",
+        f"📦 <b>STOCK AGREGADO</b>\n👮 Admin: {update.effective_user.id}\n➕ Cantidad: {len(items)}\n📝 Items: {' | '.join(items[:10])}",
     )
 
 
@@ -628,7 +817,10 @@ async def addcred(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Usuario no registrado.")
     uid = user_data[0]
     with get_db_connection() as conn:
-        conn.execute("UPDATE users SET credits = credits + ? WHERE id=?", (amount, uid))
+        conn.execute(
+            "UPDATE users SET credits = credits + ?, ultima_recarga=datetime('now', 'localtime') WHERE id=?",
+            (amount, uid),
+        )
         conn.commit()
         new_credits = conn.execute(
             "SELECT credits FROM users WHERE id=?", (uid,)
@@ -663,7 +855,10 @@ async def delcred(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_db_connection() as conn:
         row = conn.execute("SELECT credits FROM users WHERE id=?", (uid,)).fetchone()
         new_credits = max(row[0] - amount, 0)
-        conn.execute("UPDATE users SET credits=? WHERE id=?", (new_credits, uid))
+        conn.execute(
+            "UPDATE users SET credits=?, ultima_recarga=datetime('now', 'localtime') WHERE id=?",
+            (new_credits, uid),
+        )
         conn.commit()
     await update.message.reply_text(
         f"✅ Créditos restados. Saldo de <code>{uid}</code>: {new_credits}",
@@ -726,10 +921,44 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = buscar_usuario_por_arg(context.args[0])
     if not user:
         return await update.message.reply_text("❌ Usuario no encontrado.")
-    await update.message.reply_text(
-        f"👤 Nombre: {user[1]}\n📛 @{user[2]}\n🆔 <code>{user[0]}</code>\n💰 Créditos: {user[3]}",
-        parse_mode=ParseMode.HTML,
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, name, username, credits, is_banned, is_admin, is_pending,
+                   fecha_registro, ultima_recarga, aprobado_en
+            FROM users
+            WHERE id=?
+            """,
+            (user[0],),
+        )
+        info_user = cursor.fetchone()
+        cursor.execute(
+            "SELECT COUNT(*), MAX(fecha), MAX(expiracion) FROM history WHERE user_id=?",
+            (user[0],),
+        )
+        compras_total, ultima_compra, ultima_expiracion = cursor.fetchone()
+
+    estado = "Pendiente" if info_user[6] == 1 else "Activo"
+    if info_user[4] == 1:
+        estado = "Baneado"
+    admin_text = "Sí" if info_user[5] == 1 or is_super_admin(info_user[0]) else "No"
+    username_text = f"@{info_user[2]}" if info_user[2] else "Sin username"
+    texto = (
+        f"👤 Nombre: {info_user[1]}\n"
+        f"📛 Usuario: {username_text}\n"
+        f"🆔 ID: <code>{info_user[0]}</code>\n"
+        f"💰 Créditos: {info_user[3]}\n"
+        f"📌 Estado: {estado}\n"
+        f"👑 Admin: {admin_text}\n"
+        f"🕒 Registro: {format_datetime(info_user[7])}\n"
+        f"💳 Última recarga: {format_datetime(info_user[8])}\n"
+        f"✅ Aprobado: {format_datetime(info_user[9])}\n"
+        f"🛒 Compras: {compras_total}\n"
+        f"📅 Última compra: {format_datetime(ultima_compra)}\n"
+        f"⏳ Última expiración: {format_datetime(ultima_expiracion)}"
     )
+    await update.message.reply_text(texto, parse_mode=ParseMode.HTML)
 
 
 async def compras(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -742,15 +971,35 @@ async def compras(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Usuario no encontrado.")
     with get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT cantidad, fecha, items FROM history WHERE user_id=? ORDER BY id DESC",
+            "SELECT cantidad, fecha, items, expiracion FROM history WHERE user_id=? ORDER BY id DESC",
             (user[0],),
         ).fetchall()
     if not rows:
         return await update.message.reply_text("⚠️ No tiene compras.")
     texto = f"🛍 Compras de {user[1]}:\n"
     for r in rows:
-        texto += f"\n📅 {r[1]} - Compró {r[0]} items."
+        texto += (
+            f"\n📅 {format_datetime(r[1])} - Compró {r[0]} items."
+            f"\n⏳ Expira: {format_datetime(r[3])}"
+        )
     await update.message.reply_text(texto[:4000])
+
+
+async def testchats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    resultados = []
+    for label, raw_id in (("Canal", CHANNEL_ID), ("Debug", LOG_GROUP_ID)):
+        try:
+            resolved_id, chat = await resolve_chat_target(context.bot, raw_id)
+            resultados.append(
+                f"✅ {label}: <code>{resolved_id}</code> | {chat.title or chat.username or chat.id}"
+            )
+        except Exception as exc:
+            resultados.append(f"❌ {label}: <code>{raw_id or 'vacío'}</code> | {exc}")
+
+    await update.message.reply_text("\n".join(resultados), parse_mode=ParseMode.HTML)
 
 
 async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -843,30 +1092,39 @@ async def canal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     )
     try:
+        target_chat_id, chat = await resolve_chat_target(context.bot, CHANNEL_ID)
         if update.message.reply_to_message:
             await context.bot.copy_message(
-                chat_id=CHANNEL_ID,
+                chat_id=target_chat_id,
                 from_chat_id=update.message.chat_id,
                 message_id=update.message.reply_to_message.message_id,
-                reply_markup=kb,
             )
         else:
             await context.bot.send_message(
-                chat_id=CHANNEL_ID, text=" ".join(context.args), reply_markup=kb
+                chat_id=target_chat_id,
+                text=" ".join(context.args),
+                reply_markup=kb,
             )
-        await update.message.reply_text(f"✅ Publicado exitosamente.")
+        await update.message.reply_text(
+            f"✅ Publicado exitosamente en <b>{chat.title or chat.username or target_chat_id}</b>.",
+            parse_mode=ParseMode.HTML,
+        )
+        await send_debug_log(
+            context,
+            f"📣 <b>MENSAJE AL CANAL</b>\n👮 Admin: {update.effective_user.id}\n🎯 Chat: <code>{target_chat_id}</code>\n📝 Texto: {' '.join(context.args) if context.args else 'mensaje reenviado'}",
+        )
     except Exception as e:
-        await update.message.reply_text(f"❌ Error al enviar: {e}")
+        await update.message.reply_text(
+            f"❌ Error al enviar al canal.\nCHANNEL_ID actual: <code>{CHANNEL_ID}</code>\nError: <code>{e}</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 # ================= COMPRAR (NÚCLEO) =================
 async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    if is_user_banned(uid):
-        return await update.message.reply_text(
-            "⛔️ <b>ACCESO DENEGADO</b>\nTu cuenta ha sido suspendida.",
-            parse_mode=ParseMode.HTML,
-        )
+    if not await ensure_user_access(update):
+        return
 
     if not context.args or not context.args[0].isdigit():
         return await update.message.reply_text("Uso: /comprar 1")
@@ -962,6 +1220,8 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def historia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_user_access(update):
+        return
     uid = str(update.effective_user.id)
     with get_db_connection() as conn:
         rows = conn.execute(
@@ -1031,6 +1291,7 @@ def main():
     app.add_handler(CommandHandler("info", info))
     app.add_handler(CommandHandler("anuncio", anuncio))
     app.add_handler(CommandHandler("canal", canal))
+    app.add_handler(CommandHandler("testchats", testchats))
     app.add_handler(CommandHandler("panel", panel))
     app.add_handler(CommandHandler("setdias", setdias))
     app.add_handler(CommandHandler("ban", ban))
