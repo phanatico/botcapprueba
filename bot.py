@@ -278,7 +278,7 @@ def pending_users_text():
 def user_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("/menu"), KeyboardButton("/start")],
+            [KeyboardButton("/cmds"), KeyboardButton("/start")],
             [KeyboardButton("/me"), KeyboardButton("/buy")],
             [KeyboardButton("/comprar 1"), KeyboardButton("/comprar 2")],
             [KeyboardButton("/comprar 3"), KeyboardButton("/historia")],
@@ -573,7 +573,7 @@ Por favor espera ser aprobado para usar el bot.
 👋 <b>Bienvenido a la Tienda Automática</b>
 
 ✅ Tu cuenta ha sido validada.
-Usa /menu para volver al inicio.
+Usa /cmds para volver al inicio.
 """,
                 parse_mode=ParseMode.HTML,
                 reply_markup=user_menu_keyboard(),
@@ -591,7 +591,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📜 <b>COMANDOS USUARIO</b>
 
 /start - Inicia el bot y registra tu cuenta (pendiente de aprobación)
-/menu - Muestra el menú principal
+/cmds - Muestra el menú principal
 /ayuda - Pide ayuda al soporte
 /me - Muestra tu perfil, créditos y stock
 /buy - Muestra precios y cómo recargar
@@ -606,7 +606,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 /productos - 📦 Abre el panel de productos
 /users - 👥 Abre el panel de usuarios
-/stock - 📦 Abre el panel de stock
+/stock - 📦 Abre el panel de productos
 /anuncio TEXTO - Envía un DM a todos los usuarios
 /canal TEXTO - Publica en el canal oficial
 /testchats - Verifica canal y grupo debug
@@ -619,20 +619,22 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /deladmin ID/@user - Quita permisos de Admin
 /admins - Muestra la lista de Administradores
 """
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=user_menu_keyboard()
+    )
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if is_super_admin(uid) or is_admin(uid):
         await update.message.reply_text(
-            "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa los botones o escribe /menu.",
+            "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa los botones o escribe /cmds.",
             parse_mode=ParseMode.HTML,
             reply_markup=user_menu_keyboard(),
         )
         return
     await update.message.reply_text(
-        "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa /start para comenzar.",
+        "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa /cmds para ver los comandos.",
         parse_mode=ParseMode.HTML,
         reply_markup=user_menu_keyboard(),
     )
@@ -891,7 +893,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif query.data == "back_cmds":
         await query.message.reply_text(
-            "🔙 Escribe /menu para volver al menú principal.",
+            "🔙 Escribe /cmds para volver al menú principal.",
             parse_mode=ParseMode.HTML,
             reply_markup=user_menu_keyboard(),
         )
@@ -1594,7 +1596,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("register", register))
     app.add_handler(CommandHandler("cmds", cmds))
-    app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("me", me))
     app.add_handler(CommandHandler("buy", buy))
@@ -1603,7 +1604,11 @@ def main():
 
     app.add_handler(CommandHandler("productos", productos))
     app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CallbackQueryHandler(admin_callbacks, pattern="^admin_"))
+    app.add_handler(
+        CallbackQueryHandler(
+            admin_callbacks, pattern="^(admin_|stock_|users_|back_cmds)$"
+        )
+    )
 
     app.add_handler(CommandHandler("addadmin", addadmin))
     app.add_handler(CommandHandler("deladmin", deladmin))
