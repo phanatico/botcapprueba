@@ -619,7 +619,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /deladmin ID/@user - Quita permisos de Admin
 /admins - Muestra la lista de Administradores
 """
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         text, parse_mode=ParseMode.HTML, reply_markup=user_menu_keyboard()
     )
 
@@ -892,11 +892,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "back_cmds":
-        await query.message.reply_text(
-            "🔙 Escribe /cmds para volver al menú principal.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=user_menu_keyboard(),
-        )
+        await cmds(update, context)
 
 
 # ================= GESTIÓN DE ADMINISTRADORES =================
@@ -1606,7 +1602,7 @@ def main():
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(
         CallbackQueryHandler(
-            admin_callbacks, pattern="^(admin_|stock_|users_|back_cmds)$"
+            admin_callbacks, pattern="^(admin_.*|stock_.*|users_.*|back_cmds)$"
         )
     )
 
