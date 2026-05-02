@@ -281,6 +281,7 @@ def user_menu_keyboard():
             [KeyboardButton("/menu"), KeyboardButton("/start")],
             [KeyboardButton("/me"), KeyboardButton("/buy")],
             [KeyboardButton("/comprar 1"), KeyboardButton("/historia")],
+            [KeyboardButton("/ayuda"), KeyboardButton("/cmds")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -351,6 +352,12 @@ def users_menu_keyboard():
                 InlineKeyboardButton("⬅️ Volver", callback_data="back_cmds"),
             ],
         ]
+    )
+
+
+def back_to_cmds_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Volver a /cmds", callback_data="back_cmds")]]
     )
 
 
@@ -481,10 +488,11 @@ async def send_debug_log(context: ContextTypes.DEFAULT_TYPE, text: str):
 
 # ================= ERROR =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print("ERROR CAUGHT:", context.error)
-    await send_debug_log(
-        context, f"⚠️ <b>ERROR DEL SISTEMA:</b>\n<code>{context.error}</code>"
-    )
+    err = str(context.error)
+    print("ERROR CAUGHT:", err)
+    if "'NoneType' object has no attribute 'reply_text'" in err:
+        return
+    await send_debug_log(context, f"⚠️ <b>ERROR DEL SISTEMA:</b>\n<code>{err}</code>")
 
 
 # ================= START / REGISTER =================
@@ -583,6 +591,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 /start - Inicia el bot y registra tu cuenta (pendiente de aprobación)
 /menu - Muestra el menú principal
+/ayuda - Pide ayuda al soporte
 /me - Muestra tu perfil, créditos y stock
 /buy - Muestra precios y cómo recargar
 /comprar 1 - Compra 1 item (descuenta 1 crédito)
@@ -623,6 +632,34 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa /start para comenzar.",
         parse_mode=ParseMode.HTML,
         reply_markup=user_menu_keyboard(),
+    )
+
+
+async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_user_access(update):
+        return
+    await update.message.reply_text(
+        "🆘 <b>AYUDA</b>\n\nTu duda será atendida en el menor tiempo posible. Gracias.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=user_menu_keyboard(),
+    )
+    await send_debug_log(
+        context,
+        f"🆘 <b>USUARIO NECESITA AYUDA</b>\n👤 {update.effective_user.first_name}\n🆔 <code>{update.effective_user.id}</code>\n📛 @{update.effective_user.username or 'sin_username'}",
+    )
+
+
+async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_user_access(update):
+        return
+    await update.message.reply_text(
+        "🆘 <b>AYUDA</b>\n\nTu duda será atendida en el menor tiempo posible. Gracias.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=user_menu_keyboard(),
+    )
+    await send_debug_log(
+        context,
+        f"🆘 <b>USUARIO NECESITA AYUDA</b>\n👤 {update.effective_user.first_name}\n🆔 <code>{update.effective_user.id}</code>\n📛 @{update.effective_user.username or 'sin_username'}",
     )
 
 
@@ -736,7 +773,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [InlineKeyboardButton("⬅️ Volver a /cmds", callback_data="back_cmds")],
     ]
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         texto, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML
     )
 
@@ -749,7 +786,9 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.data == "admin_stock":
         _, stock_text = stock_list_text(limit=5)
-        await query.message.reply_text(stock_text, parse_mode=ParseMode.HTML)
+        await query.message.reply_text(
+            stock_text, parse_mode=ParseMode.HTML, reply_markup=stock_menu_keyboard()
+        )
     elif query.data == "stock_view":
         _, stock_text = stock_list_text(limit=5)
         await query.message.reply_text(
@@ -759,11 +798,13 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "➕ <b>Agregar stock</b>\nUsa /stock item1 item2 item3\nTambién puedes separar por saltos de línea, comas o ;",
             parse_mode=ParseMode.HTML,
+            reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "stock_del_help":
         await query.message.reply_text(
             "🗑 <b>Borrar stock</b>\nUsa /delstock N para borrar un item por número.",
             parse_mode=ParseMode.HTML,
+            reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "admin_panel":
         await panel(update, context)
@@ -771,6 +812,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "⚙️ Para cambiar la duración: <code>/setdias 30</code>",
             parse_mode=ParseMode.HTML,
+            reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "stock_active":
         await panel(update, context)
@@ -955,20 +997,20 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= RESTO DE FUNCIONES ADMIN =================
 async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("❌ No tienes permisos.")
+        return await update.effective_message.reply_text("❌ No tienes permisos.")
     with get_db_connection() as conn:
         users = conn.execute(
             "SELECT id, username, credits, is_pending FROM users ORDER BY id DESC"
         ).fetchall()
     if not users:
-        return await update.message.reply_text("No hay usuarios registrados.")
+        return await update.effective_message.reply_text("No hay usuarios registrados.")
 
     texto = f"👥 <b>PANEL DE USUARIOS ({len(users)})</b>\n\n"
     for u in users:
         estado = "PENDIENTE" if u[3] == 1 else "ACTIVO"
         texto += f"{u[0]} | {u[1]} | 💰 {u[2]} | {estado}\n"
     texto += "\n💡 Usa /info, /addcred, /delcred, /ban, /unban, /aprobar"
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         texto[:4000], parse_mode=ParseMode.HTML, reply_markup=users_menu_keyboard()
     )
 
@@ -1257,8 +1299,10 @@ async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             WHERE h.expiracion > datetime('now', 'localtime') ORDER BY h.expiracion ASC
         """).fetchall()
     if not activas:
-        return await update.message.reply_text(
-            "📊 <b>PANEL</b>\n⚠️ No hay cuentas activas.", parse_mode=ParseMode.HTML
+        return await update.effective_message.reply_text(
+            "📊 <b>PANEL DE CUENTAS ACTIVAS</b>\n⚠️ No hay cuentas activas.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=stock_menu_keyboard(),
         )
     texto = "📊 <b>PANEL DE CUENTAS ACTIVAS</b>\n\n"
     for row in activas:
@@ -1274,7 +1318,11 @@ async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         texto += f"👤 {uname_str}\n📦 {item_s}\n⏳ <b>Le quedan:</b> {dias} días ({exp_date.strftime('%d/%m/%Y')})\n━━━━━━━━━━━━━━\n"
     for i in range(0, len(texto), 4000):
-        await update.message.reply_text(texto[i : i + 4000], parse_mode=ParseMode.HTML)
+        await update.effective_message.reply_text(
+            texto[i : i + 4000],
+            parse_mode=ParseMode.HTML,
+            reply_markup=stock_menu_keyboard(),
+        )
 
 
 # ================= CANAL / ANUNCIO =================
@@ -1515,6 +1563,7 @@ def main():
     app.add_handler(CommandHandler("register", register))
     app.add_handler(CommandHandler("cmds", cmds))
     app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("me", me))
     app.add_handler(CommandHandler("buy", buy))
     app.add_handler(CommandHandler("comprar", comprar))
