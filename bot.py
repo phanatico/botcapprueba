@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import ReplyKeyboardMarkup, KeyboardButton
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -147,6 +148,11 @@ def init_db():
             cursor.execute(
                 "UPDATE users SET fecha_registro=datetime('now', 'localtime') WHERE fecha_registro IS NULL OR fecha_registro=''"
             )
+        for admin_id in ADMIN_IDS:
+            cursor.execute(
+                "UPDATE users SET is_pending=0, is_admin=1, aprobado_en=datetime('now', 'localtime') WHERE id=?",
+                (str(admin_id),),
+            )
 
         conn.commit()
 
@@ -269,6 +275,42 @@ def pending_users_text():
     return texto
 
 
+def user_menu_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("/menu"), KeyboardButton("/start")],
+            [KeyboardButton("/me"), KeyboardButton("/buy")],
+            [KeyboardButton("/comprar 1"), KeyboardButton("/historia")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def stock_list_text(limit=None):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        total = cursor.execute("SELECT COUNT(*) FROM stock").fetchone()[0]
+        query = "SELECT id, item FROM stock ORDER BY id DESC"
+        if limit is not None:
+            query += f" LIMIT {int(limit)}"
+        rows = cursor.execute(query).fetchall()
+
+    if not rows:
+        return (
+            total,
+            "📦 <b>Stock Actual:</b> Vacío.\n💡 Usa /stock para agregar items.",
+        )
+
+    texto = f"📦 <b>Stock Actual ({total} items):</b>\n"
+    for idx, row in enumerate(rows, start=1):
+        texto += f"{idx}. <code>{row[1]}</code> <i>(ID {row[0]})</i>\n"
+    if total > len(rows):
+        texto += f"\n... y {total - len(rows)} más"
+    texto += "\n\n💡 Usa /delstock N para borrar un item por número."
+    return total, texto
+
+
 def parse_stock_items(raw_text):
     cleaned = (raw_text or "").replace("\r", "\n")
     cleaned = cleaned.replace("/stock", " ")
@@ -342,6 +384,19 @@ async def resolve_chat_target(bot, raw_chat_id):
     raise RuntimeError(" | ".join(errors) or "chat id vacio")
 
 
+async def approve_user_if_admin(uid):
+    uid = str(uid)
+    if not is_super_admin(uid):
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET is_pending=0, is_admin=1, aprobado_en=datetime('now', 'localtime') WHERE id=?",
+            (uid,),
+        )
+        conn.commit()
+
+
 async def send_debug_log(context: ContextTypes.DEFAULT_TYPE, text: str):
     if not LOG_GROUP_ID:
         return
@@ -372,31 +427,64 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = user.first_name or "Usuario"
     username = user.username if user.username else "sin_username"
 
+    await approve_user_if_admin(uid)
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, is_pending FROM users WHERE id=?", (uid,))
         existing_user = cursor.fetchone()
 
-        if not existing_user:
-            # New user - insert as pending
+        cursor.execute("SELECT is_admin, is_pending FROM users WHERE id=?", (uid,))
+        user_state = cursor.fetchone()
+
+        if user_state and user_state[0] == 1:
             cursor.execute(
-                "INSERT INTO users (id, name, username, credits, is_banned, is_admin, is_pending, fecha_registro) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
-                (uid, name, username, 0, 0, 0, 1),
+                "UPDATE users SET is_pending=0, is_admin=1, aprobado_en=datetime('now', 'localtime') WHERE id=?",
+                (uid,),
             )
             conn.commit()
-            await update.message.reply_text(
-                """
+            existing_user = (uid, 0)
+
+        if not existing_user:
+            # New user - insert as pending
+            is_admin_user = is_super_admin(uid)
+            cursor.execute(
+                "INSERT INTO users (id, name, username, credits, is_banned, is_admin, is_pending, fecha_registro) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
+                (
+                    uid,
+                    name,
+                    username,
+                    0,
+                    0,
+                    1 if is_admin_user else 0,
+                    0 if is_admin_user else 1,
+                ),
+            )
+            conn.commit()
+            if is_admin_user:
+                await update.message.reply_text(
+                    """
+👋 <b>Bienvenido a la Tienda Automática</b>
+
+✅ Tu cuenta de admin ha sido activada automáticamente.
+""",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=user_menu_keyboard(),
+                )
+            else:
+                await update.message.reply_text(
+                    """
 👋 <b>Bienvenido a la Tienda Automática</b>
 
 ⏳ Tu cuenta está pendiente de aprobación por el administrador.
-Notificarás cuando sea aprobado.
 """,
-                parse_mode=ParseMode.HTML,
-            )
-            await send_debug_log(
-                context,
-                f"🆕 <b>NUEVO USUARIO PENDIENTE</b>\n👤 {name}\n🆔 <code>{uid}</code>\n📛 @{username}",
-            )
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=user_menu_keyboard(),
+                )
+                await send_debug_log(
+                    context,
+                    f"🆕 <b>NUEVO USUARIO PENDIENTE</b>\n👤 {name}\n🆔 <code>{uid}</code>\n📛 @{username}",
+                )
         elif existing_user[1] == 1:
             # User exists but is pending
             await update.message.reply_text(
@@ -407,6 +495,7 @@ Tu cuenta está esperando aprobación por el administrador.
 Por favor espera ser aprobado para usar el bot.
 """,
                 parse_mode=ParseMode.HTML,
+                reply_markup=user_menu_keyboard(),
             )
         else:
             # User is approved
@@ -415,9 +504,10 @@ Por favor espera ser aprobado para usar el bot.
 👋 <b>Bienvenido a la Tienda Automática</b>
 
 ✅ Tu cuenta ha sido validada.
-Usa /cmds para ver todos los comandos.
+Usa /menu para volver al inicio.
 """,
                 parse_mode=ParseMode.HTML,
+                reply_markup=user_menu_keyboard(),
             )
 
 
@@ -432,6 +522,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📜 <b>COMANDOS USUARIO</b>
 
 /start - Inicia el bot y registra tu cuenta (pendiente de aprobación)
+/menu - Muestra el menú principal
 /me - Muestra tu perfil, créditos y stock
 /buy - Muestra precios y cómo recargar
 /comprar 1 - Compra 1 item (descuenta 1 crédito)
@@ -444,6 +535,7 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /admin - 🎛 Abre el Panel de Control Interactivo
 /users - Lista usuarios registrados
 /stock TEXTO - Agrega items (puedes pegar una lista)
+/delstock N - Borra un item por número
 /resetstock - Borra todo el stock
 /addcred ID/@user - Agrega créditos
 /delcred ID/@user - Quita créditos
@@ -467,6 +559,22 @@ async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /admins - Muestra la lista de Administradores
 """
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if is_super_admin(uid) or is_admin(uid):
+        await update.message.reply_text(
+            "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa los botones o escribe /cmds.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_menu_keyboard(),
+        )
+        return
+    await update.message.reply_text(
+        "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa /start para comenzar.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=user_menu_keyboard(),
+    )
 
 
 # ================= ME & BUY =================
@@ -587,24 +695,8 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     if query.data == "admin_stock":
-        count = stock_count()
-        if count == 0:
-            await query.message.reply_text(
-                "📦 <b>Stock Actual:</b> Vacío.\n💡 Usa /stock para agregar items.",
-                parse_mode=ParseMode.HTML,
-            )
-        else:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT item FROM stock ORDER BY id DESC LIMIT 5")
-                items = cursor.fetchall()
-                items_text = "\n".join([f"• {item[0]}" for item in items])
-                more_text = f"\n\n... y {count - 5} más" if count > 5 else ""
-                await query.message.reply_text(
-                    f"📦 <b>Stock Actual ({count} items):</b>\n{items_text}{more_text}\n"
-                    f"💡 <i>Con /stock puedes pegar varias cuentas por espacios, saltos de línea, comas o repitiendo /stock.</i>",
-                    parse_mode=ParseMode.HTML,
-                )
+        _, stock_text = stock_list_text(limit=5)
+        await query.message.reply_text(stock_text, parse_mode=ParseMode.HTML)
     elif query.data == "admin_panel":
         await panel(update, context)
     elif query.data == "admin_vigencia":
@@ -794,6 +886,45 @@ async def stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_debug_log(
         context,
         f"📦 <b>STOCK AGREGADO</b>\n👮 Admin: {update.effective_user.id}\n➕ Cantidad: {len(items)}\n📝 Items: {' | '.join(items[:10])}",
+    )
+
+
+async def delstock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args or not context.args[0].isdigit():
+        return await update.message.reply_text("Uso: /delstock NUMERO")
+
+    numero = int(context.args[0])
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        rows = cursor.execute("SELECT id, item FROM stock ORDER BY id DESC").fetchall()
+        if not rows:
+            return await update.message.reply_text("⚠️ No hay stock para borrar.")
+
+        target_row = None
+        if 1 <= numero <= len(rows):
+            target_row = rows[numero - 1]
+        else:
+            target_row = cursor.execute(
+                "SELECT id, item FROM stock WHERE id=?", (numero,)
+            ).fetchone()
+
+        if not target_row:
+            return await update.message.reply_text(
+                "❌ No encontré ese número en el stock."
+            )
+
+        cursor.execute("DELETE FROM stock WHERE id=?", (target_row[0],))
+        conn.commit()
+
+    await update.message.reply_text(
+        f"🗑 Eliminado stock #{numero} -> <code>{target_row[1]}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    await send_debug_log(
+        context,
+        f"🗑 <b>STOCK ELIMINADO</b>\n👮 Admin: {update.effective_user.id}\n# Número: {numero}\n🗂 Item: <code>{target_row[1]}</code>",
     )
 
 
@@ -1269,6 +1400,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("register", register))
     app.add_handler(CommandHandler("cmds", cmds))
+    app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("me", me))
     app.add_handler(CommandHandler("buy", buy))
     app.add_handler(CommandHandler("comprar", comprar))
@@ -1284,6 +1416,7 @@ def main():
     app.add_handler(CommandHandler("aprobar", aprobar))
 
     app.add_handler(CommandHandler("stock", stock))
+    app.add_handler(CommandHandler("delstock", delstock))
     app.add_handler(CommandHandler("resetstock", resetstock))
     app.add_handler(CommandHandler("addcred", addcred))
     app.add_handler(CommandHandler("delcred", delcred))
