@@ -1737,12 +1737,6 @@ def main():
     app.add_error_handler(error_handler)
 
     print("BOT INICIADO Y CORRIENDO...")
-
-    import sys, asyncio
-
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
     app.run_polling()
 
 
