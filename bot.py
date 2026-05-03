@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram import ReplyKeyboardMarkup, KeyboardButton
+from telegram import ReplyKeyboardRemove
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -275,17 +275,114 @@ def pending_users_text():
     return texto
 
 
-def user_menu_keyboard():
-    return ReplyKeyboardMarkup(
+async def remove_legacy_menu_once(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data = context.user_data
+    if user_data.get("legacy_menu_removed"):
+        return
+    message = update.effective_message
+    if not message:
+        return
+    await message.reply_text(
+        "✅ Menú actualizado. El teclado fijo ya no se usa.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    user_data["legacy_menu_removed"] = True
+
+
+def user_menu_keyboard(uid=0):
+    kb = [
         [
-            [KeyboardButton("/cmds"), KeyboardButton("/start")],
-            [KeyboardButton("/me"), KeyboardButton("/buy")],
-            [KeyboardButton("/comprar 1"), KeyboardButton("/comprar 2")],
-            [KeyboardButton("/comprar 3"), KeyboardButton("/historia")],
-            [KeyboardButton("/ayuda"), KeyboardButton("/cmds")],
+            InlineKeyboardButton("👤 Mi perfil", callback_data="main_me"),
+            InlineKeyboardButton("💰 Recargar", callback_data="main_buy"),
         ],
-        resize_keyboard=True,
-        is_persistent=True,
+        [
+            InlineKeyboardButton("📜 Historial", callback_data="main_history"),
+            InlineKeyboardButton("🆘 Ayuda", callback_data="help_start"),
+        ],
+    ]
+    if is_admin(uid):
+        kb.extend(
+            [
+                [
+                    InlineKeyboardButton("👑 Admin", callback_data="admin_home"),
+                    InlineKeyboardButton("📦 Productos", callback_data="stock_home"),
+                ],
+                [InlineKeyboardButton("👥 Usuarios", callback_data="users_menu")],
+            ]
+        )
+    return InlineKeyboardMarkup(kb)
+
+
+def cmds_text(uid):
+    text = """
+📜 <b>COMANDOS USUARIO</b>
+
+/start - Inicia el bot y registra tu cuenta
+/cmds - Muestra el menú principal
+/ayuda - Pide ayuda al soporte
+/me - Muestra tu perfil, créditos y stock
+/buy - Muestra precios y cómo recargar
+/comprar 1 - Compra 1 item y descuenta 1 crédito
+/comprar 2 - Compra 2 items y descuenta 2 créditos
+/comprar 3 - Compra 3 items y descuenta 3 créditos
+/historia - Muestra tu historial de compras
+"""
+    if is_admin(uid):
+        text += """
+🛠 <b>COMANDOS ADMIN</b>
+
+/admin - Abre el menú de admin
+/productos - Abre el panel de productos
+/users - Abre el panel de usuarios
+/stock - Abre el panel de stock o agrega items
+/anuncio TEXTO - Envía un DM a todos los usuarios
+/canal TEXTO - Publica en el canal oficial
+/testchats - Verifica canal y grupo debug
+"""
+    if is_super_admin(uid):
+        text += """
+👑 <b>COMANDOS DUEÑO (Super Admin)</b>
+
+/addadmin ID/@user - Otorga permisos de Admin
+/deladmin ID/@user - Quita permisos de Admin
+/admins - Muestra la lista de Administradores
+"""
+    return text
+
+
+async def send_menu_message(
+    update: Update,
+    text: str,
+    reply_markup=None,
+    parse_mode=ParseMode.HTML,
+):
+    query = update.callback_query
+    message = update.effective_message
+    if query:
+        try:
+            await query.edit_message_text(
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception as exc:
+            if "Message is not modified" in str(exc):
+                return
+            if not message:
+                return
+            await message.reply_text(
+                text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+            return
+    if not message:
+        return
+    await message.reply_text(
+        text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
     )
 
 
@@ -298,11 +395,14 @@ def stock_menu_keyboard():
             ],
             [
                 InlineKeyboardButton("🗑 Borrar N", callback_data="stock_del_help"),
-                InlineKeyboardButton("⚙️ Vigencia", callback_data="stock_vigencia"),
+                InlineKeyboardButton("⚙️ Vigencia", callback_data="admin_vigencia"),
             ],
             [
                 InlineKeyboardButton("🔄 Ver activos", callback_data="stock_active"),
-                InlineKeyboardButton("⬅️ Volver", callback_data="back_cmds"),
+                InlineKeyboardButton("👑 Admin", callback_data="admin_home"),
+            ],
+            [
+                InlineKeyboardButton("🏠 Menú", callback_data="back_cmds"),
             ],
         ]
     )
@@ -350,8 +450,9 @@ def users_menu_keyboard():
             ],
             [
                 InlineKeyboardButton("✅ Aprobar", callback_data="users_aprobar"),
-                InlineKeyboardButton("⬅️ Volver", callback_data="back_cmds"),
+                InlineKeyboardButton("👑 Admin", callback_data="admin_home"),
             ],
+            [InlineKeyboardButton("🏠 Menú", callback_data="back_cmds")],
         ]
     )
 
@@ -407,6 +508,7 @@ def parse_stock_items(raw_text):
 
 async def ensure_user_access(update: Update):
     uid = str(update.effective_user.id)
+    message = update.effective_message
     if is_admin(uid):
         return True
     with get_db_connection() as conn:
@@ -414,16 +516,16 @@ async def ensure_user_access(update: Update):
         cursor.execute("SELECT is_pending, is_banned FROM users WHERE id=?", (uid,))
         row = cursor.fetchone()
     if not row:
-        await update.message.reply_text("⚠️ Usa /start primero.")
+        await message.reply_text("⚠️ Usa /start primero.")
         return False
     if row[1] == 1:
-        await update.message.reply_text(
+        await message.reply_text(
             "⛔️ <b>ACCESO DENEGADO</b>\nTu cuenta ha sido suspendida.",
             parse_mode=ParseMode.HTML,
         )
         return False
     if row[0] == 1:
-        await update.message.reply_text(
+        await message.reply_text(
             "⏳ <b>Cuenta pendiente</b>\nTu cuenta sigue esperando aprobación del administrador.",
             parse_mode=ParseMode.HTML,
         )
@@ -499,6 +601,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ================= START / REGISTER =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return
     uid = str(user.id)
     name = user.first_name or "Usuario"
     username = user.username if user.username else "sin_username"
@@ -541,14 +646,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
             )
             conn.commit()
-            await update.message.reply_text(
+            await message.reply_text(
                 """
 👋 <b>Bienvenido a la Tienda Automática</b>
 
 ⏳ Tu cuenta está pendiente de aprobación por el administrador.
 """,
                 parse_mode=ParseMode.HTML,
-                reply_markup=user_menu_keyboard(),
+                reply_markup=user_menu_keyboard(uid),
             )
             await send_debug_log(
                 context,
@@ -556,7 +661,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif existing_user[1] == 1:
             # User exists but is pending
-            await update.message.reply_text(
+            await message.reply_text(
                 """
 ⏳ <b>Cuenta Pendiente de Aprobación</b>
 
@@ -564,11 +669,11 @@ Tu cuenta está esperando aprobación por el administrador.
 Por favor espera ser aprobado para usar el bot.
 """,
                 parse_mode=ParseMode.HTML,
-                reply_markup=user_menu_keyboard(),
+                reply_markup=user_menu_keyboard(uid),
             )
         else:
             # User is approved
-            await update.message.reply_text(
+            await message.reply_text(
                 """
 👋 <b>Bienvenido a la Tienda Automática</b>
 
@@ -576,7 +681,7 @@ Por favor espera ser aprobado para usar el bot.
 Usa /cmds para volver al inicio.
 """,
                 parse_mode=ParseMode.HTML,
-                reply_markup=user_menu_keyboard(),
+                reply_markup=user_menu_keyboard(uid),
             )
 
 
@@ -586,70 +691,27 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= CMDS =================
 async def cmds(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = """
-📜 <b>COMANDOS USUARIO</b>
-
-/start - Inicia el bot y registra tu cuenta (pendiente de aprobación)
-/cmds - Muestra el menú principal
-/ayuda - Pide ayuda al soporte
-/me - Muestra tu perfil, créditos y stock
-/buy - Muestra precios y cómo recargar
-/comprar 1 - Compra 1 item y descuenta 1 crédito
-/comprar 2 - Compra 2 items y descuenta 2 créditos
-/comprar 3 - Compra 3 items y descuenta 3 créditos
-/historia - Muestra tu historial de compras
-"""
-    if is_admin(uid):
-        text += """
-🛠 <b>COMANDOS ADMIN</b>
-
-/productos - 📦 Abre el panel de productos
-/users - 👥 Abre el panel de usuarios
-/stock - 📦 Abre el panel de productos
-/anuncio TEXTO - Envía un DM a todos los usuarios
-/canal TEXTO - Publica en el canal oficial
-/testchats - Verifica canal y grupo debug
-"""
-    if is_super_admin(uid):
-        text += """
-👑 <b>COMANDOS DUEÑO (Super Admin)</b>
-
-/addadmin ID/@user - Otorga permisos de Admin
-/deladmin ID/@user - Quita permisos de Admin
-/admins - Muestra la lista de Administradores
-"""
-    await update.effective_message.reply_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=user_menu_keyboard()
-    )
-
-
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    if is_super_admin(uid) or is_admin(uid):
-        await update.message.reply_text(
-            "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa los botones o escribe /cmds.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=user_menu_keyboard(),
-        )
+    if not update.effective_user:
         return
-    await update.message.reply_text(
-        "🏠 <b>MENÚ PRINCIPAL</b>\n\nUsa /cmds para ver los comandos.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=user_menu_keyboard(),
+    uid = update.effective_user.id
+    await remove_legacy_menu_once(update, context)
+    await send_menu_message(
+        update,
+        cmds_text(uid),
+        reply_markup=user_menu_keyboard(uid),
     )
 
 
 async def productos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await admin(update, context)
+    await stock(update, context)
 
 
 async def usuarios_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not update.effective_user or not is_admin(update.effective_user.id):
         return
-    await update.effective_message.reply_text(
+    await send_menu_message(
+        update,
         users_menu_text(),
-        parse_mode=ParseMode.HTML,
         reply_markup=users_menu_keyboard(),
     )
 
@@ -657,34 +719,29 @@ async def usuarios_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_user_access(update):
         return
-    await update.message.reply_text(
-        "🆘 <b>AYUDA</b>\n\nTu duda será atendida en el menor tiempo posible. Gracias.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=user_menu_keyboard(),
-    )
-    await send_debug_log(
-        context,
-        f"🆘 <b>USUARIO NECESITA AYUDA</b>\n👤 {update.effective_user.first_name}\n🆔 <code>{update.effective_user.id}</code>\n📛 @{update.effective_user.username or 'sin_username'}",
-    )
-
-
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await ensure_user_access(update):
+    if not update.effective_user:
         return
-    await update.message.reply_text(
-        "🆘 <b>AYUDA</b>\n\nTu duda será atendida en el menor tiempo posible. Gracias.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=user_menu_keyboard(),
+    await remove_legacy_menu_once(update, context)
+    context.user_data["awaiting_help_question"] = True
+    await send_menu_message(
+        update,
+        "🆘 <b>AYUDA</b>\n\n¿Qué necesitas? Escríbelo en tu siguiente mensaje y lo mandaré al canal debug.",
+        reply_markup=back_to_cmds_keyboard(),
     )
     await send_debug_log(
         context,
-        f"🆘 <b>USUARIO NECESITA AYUDA</b>\n👤 {update.effective_user.first_name}\n🆔 <code>{update.effective_user.id}</code>\n📛 @{update.effective_user.username or 'sin_username'}",
+        f"🆘 <b>MODO AYUDA ACTIVADO</b>\n👤 {update.effective_user.first_name}\n🆔 <code>{update.effective_user.id}</code>\n📛 @{update.effective_user.username or 'sin_username'}",
     )
 
 
 # ================= ME & BUY =================
 async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_user_access(update):
+        return
+    if not update.effective_user:
+        return
+    message = update.effective_message
+    if not message:
         return
     uid = str(update.effective_user.id)
     with get_db_connection() as conn:
@@ -696,7 +753,7 @@ async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = cursor.fetchone()
 
     if not user:
-        return await update.message.reply_text("⚠️ Usa /start primero.")
+        return await message.reply_text("⚠️ Usa /start primero.")
 
     texto_perfil = f"""
 👤 <b>MI PERFIL</b>\n
@@ -709,19 +766,20 @@ async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💳 Última recarga: {format_datetime(user[4])}
 """
     try:
-        await update.effective_message.reply_photo(
+        await message.reply_photo(
             photo=open("imagen/Estadisticas.jpeg", "rb"),
             caption=texto_perfil,
             parse_mode=ParseMode.HTML,
         )
     except FileNotFoundError:
-        await update.effective_message.reply_text(
-            texto_perfil, parse_mode=ParseMode.HTML
-        )
+        await message.reply_text(texto_perfil, parse_mode=ParseMode.HTML)
 
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_user_access(update):
+        return
+    message = update.effective_message
+    if not message:
         return
     kb = [
         [InlineKeyboardButton("📢 Canal Oficial", url=CHANNEL_URL)],
@@ -732,7 +790,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ],
     ]
-    await update.message.reply_text(
+    await message.reply_text(
         f"""
 💰 <b>RECARGA DE SALDO</b>
 
@@ -752,8 +810,9 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= ADMIN DASHBOARD =================
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not update.effective_user or not is_admin(update.effective_user.id):
         return
+    await remove_legacy_menu_once(update, context)
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -792,45 +851,66 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [InlineKeyboardButton("⬅️ Volver al menú", callback_data="back_cmds")],
     ]
-    await update.effective_message.reply_text(
-        texto, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML
+    await send_menu_message(
+        update,
+        texto,
+        reply_markup=InlineKeyboardMarkup(kb),
     )
 
 
 async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not is_admin(query.from_user.id):
+    if not query:
+        return
+    restricted_prefixes = ("admin_", "stock_", "users_")
+    if query.data.startswith(restricted_prefixes) and not is_admin(query.from_user.id):
         return await query.answer("❌ No tienes permiso.", show_alert=True)
 
     await query.answer()
-    if query.data == "admin_stock":
+    if query.data == "main_refresh":
+        await cmds(update, context)
+    elif query.data == "main_me":
+        await me(update, context)
+    elif query.data == "main_buy":
+        await buy(update, context)
+    elif query.data == "main_history":
+        await historia(update, context)
+    elif query.data == "help_start":
+        await ayuda(update, context)
+    elif query.data == "admin_home":
+        await admin(update, context)
+    elif query.data == "admin_stock" or query.data == "stock_home":
         _, stock_text = stock_list_text(limit=5)
-        await query.message.reply_text(
-            stock_text, parse_mode=ParseMode.HTML, reply_markup=stock_menu_keyboard()
+        await send_menu_message(
+            update,
+            stock_text,
+            reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "stock_view":
         _, stock_text = stock_list_text(limit=5)
-        await query.message.reply_text(
-            stock_text, parse_mode=ParseMode.HTML, reply_markup=stock_menu_keyboard()
+        await send_menu_message(
+            update,
+            stock_text,
+            reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "stock_add_help":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "➕ <b>Agregar productos</b>\nUsa <code>/stock producto1 producto2 producto3</code>\nEjemplo: <code>/stock user:pass user2:pass2</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "stock_del_help":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "🗑 <b>Borrar producto</b>\nUsa <code>/delstock N</code>\nEjemplo: <code>/delstock 2</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "admin_panel":
         await panel(update, context)
     elif query.data == "admin_vigencia":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "⚙️ <b>Vigencia</b>\nUsa <code>/setdias 30</code>\nEjemplo: <code>/setdias 30</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=stock_menu_keyboard(),
         )
     elif query.data == "stock_active":
@@ -838,57 +918,57 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "users_view":
         await users_list(update, context)
     elif query.data == "users_pending":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             pending_users_text(),
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_addcred":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "➕ <b>Añadir créditos</b>\nUsa <code>/addcred ID CANTIDAD</code>\nEjemplo: <code>/addcred 123456789 5</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_delcred":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "➖ <b>Quitar créditos</b>\nUsa <code>/delcred ID CANTIDAD</code>\nEjemplo: <code>/delcred 123456789 2</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_info":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "ℹ️ <b>Info usuario</b>\nUsa <code>/info ID</code>\nEjemplo: <code>/info 123456789</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_compras":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "🛍 <b>Compras</b>\nUsa <code>/compras ID</code>\nEjemplo: <code>/compras 123456789</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_ban":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "⛔ <b>Banear</b>\nUsa <code>/ban ID</code>\nEjemplo: <code>/ban 123456789</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_unban":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "✅ <b>Desbanear</b>\nUsa <code>/unban ID</code>\nEjemplo: <code>/unban 123456789</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_aprobar":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             "✅ <b>Aprobar usuarios</b>\nUsa <code>/aprobar</code> para ver pendientes\nEjemplo: <code>/aprobar 123456789</code>",
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "users_menu":
-        await query.message.reply_text(
+        await send_menu_message(
+            update,
             users_menu_text(),
-            parse_mode=ParseMode.HTML,
             reply_markup=users_menu_keyboard(),
         )
     elif query.data == "back_cmds":
@@ -914,7 +994,10 @@ async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     with get_db_connection() as conn:
-        conn.execute("UPDATE users SET is_admin=1 WHERE id=?", (user_data[0],))
+        conn.execute(
+            "UPDATE users SET is_admin=1, is_pending=0, aprobado_en=datetime('now', 'localtime') WHERE id=?",
+            (user_data[0],),
+        )
         conn.commit()
 
     await update.message.reply_text(
@@ -1046,12 +1129,19 @@ async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message:
+        return
     if not is_admin(update.effective_user.id):
         return
+    await remove_legacy_menu_once(update, context)
     partes = update.message.text.split(maxsplit=1)
     if len(partes) < 2:
-        return await update.message.reply_text(
-            "Uso: /stock correo:pass\n💡 Puedes pegar varias a la vez separadas por espacios, saltos de línea, comas o repitiendo /stock."
+        _, stock_text = stock_list_text(limit=5)
+        return await update.effective_message.reply_text(
+            stock_text
+            + "\n\n➕ Usa <code>/stock item1 item2</code> para agregar productos.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=stock_menu_keyboard(),
         )
     mensaje = partes[1].strip()
     items = parse_stock_items(mensaje)
@@ -1574,11 +1664,25 @@ async def historia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    comando = (update.message.text or "").split()[0].lower()
+    if comando == "/menu":
+        return await update.message.reply_text("❌ /menu no existe aquí. Usa /cmds")
     await update.message.reply_text("❌ Comando no reconocido. Usa /cmds")
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Si le hablan normal, le mostramos los comandos
+    if context.user_data.get("awaiting_help_question"):
+        context.user_data["awaiting_help_question"] = False
+        pregunta = (update.message.text or "").strip()
+        await update.message.reply_text(
+            "✅ Tu mensaje fue enviado al canal debug. Te responderán lo antes posible.",
+            reply_markup=user_menu_keyboard(update.effective_user.id),
+        )
+        await send_debug_log(
+            context,
+            f"🆘 <b>NUEVA PREGUNTA DE AYUDA</b>\n👤 {update.effective_user.first_name}\n🆔 <code>{update.effective_user.id}</code>\n📛 @{update.effective_user.username or 'sin_username'}\n❓ <b>Pregunta:</b> {pregunta}",
+        )
+        return
     await cmds(update, context)
 
 
@@ -1602,7 +1706,8 @@ def main():
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(
         CallbackQueryHandler(
-            admin_callbacks, pattern="^(admin_.*|stock_.*|users_.*|back_cmds)$"
+            admin_callbacks,
+            pattern="^(main_.*|help_.*|admin_.*|stock_.*|users_.*|back_cmds)$",
         )
     )
 
